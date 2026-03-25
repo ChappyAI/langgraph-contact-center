@@ -1,35 +1,39 @@
 """AllTalkPro Contact Center AI Agent — LangGraph implementation.
 
 Multi-step agent for contact center operations:
-- Analyze call transcripts for sentiment and coaching
+- Analyze call transcripts for sentiment and coaching (LLM-powered)
 - Score leads from call data
-- Generate post-call summaries
+- Generate post-call summaries (LLM-powered)
 - Evaluate call quality
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.graph import StateGraph, END
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
 from typing_extensions import TypedDict
+
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
 
 
 class Context(TypedDict, total=False):
     """Runtime context for the contact center agent."""
+
     tenant_id: str
     call_id: str
     agent_id: str
-    action: str  # "sentiment" | "coaching" | "summary" | "qa" | "lead_score" | "route"
+    action: str
 
 
 @dataclass
 class State:
     """State flowing through the contact center agent graph."""
-    # Input
+
     action: str = "sentiment"
     transcript: str = ""
     call_id: str = ""
@@ -40,7 +44,6 @@ class State:
     caller_number: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    # Output (accumulated by nodes)
     sentiment: Optional[Dict[str, Any]] = None
     coaching_tip: Optional[str] = None
     summary: Optional[Dict[str, Any]] = None
@@ -51,99 +54,127 @@ class State:
 
 
 async def analyze_sentiment(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
-    """Analyze transcript sentiment."""
+    """Analyze transcript sentiment using LLM."""
     if not state.transcript:
         return {"sentiment": {"sentiment": "neutral", "score": 0.5, "emotions": []}}
 
-    return {
-        "sentiment": {
-            "sentiment": "negative" if any(w in state.transcript.lower() for w in ["frustrated", "angry", "cancel", "terrible"]) else
-                        "positive" if any(w in state.transcript.lower() for w in ["thank", "great", "happy", "excellent"]) else
-                        "neutral",
-            "score": 0.3 if any(w in state.transcript.lower() for w in ["frustrated", "angry", "cancel"]) else
-                     0.8 if any(w in state.transcript.lower() for w in ["thank", "great", "happy"]) else 0.5,
-            "emotions": [w for w in ["frustration", "anger", "satisfaction", "gratitude"]
-                        if w[:4] in state.transcript.lower()],
-            "call_id": state.call_id,
-            "tenant_id": state.tenant_id,
+    response = await llm.ainvoke(
+        "Analyze the sentiment of this call transcript. "
+        "Return ONLY valid JSON: "
+        '{"sentiment": "positive"|"neutral"|"negative", '
+        '"score": 0.0-1.0, '
+        '"emotions": ["emotion1"], '
+        '"trend": "improving"|"stable"|"declining", '
+        '"alert": true/false}\n\n'
+        f"Transcript: {state.transcript[:4000]}"
+    )
+
+    try:
+        result = json.loads(response.content)
+    except (json.JSONDecodeError, TypeError):
+        result = {
+            "sentiment": "neutral",
+            "score": 0.5,
+            "emotions": [],
+            "trend": "stable",
+            "alert": False,
         }
-    }
+
+    result["call_id"] = state.call_id
+    result["tenant_id"] = state.tenant_id
+    return {"sentiment": result}
 
 
 async def generate_coaching(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
-    """Generate real-time coaching tip based on sentiment."""
+    """Generate real-time coaching tip using LLM."""
     sentiment = state.sentiment or {}
     score = sentiment.get("score", 0.5)
+    emotions = sentiment.get("emotions", [])
 
-    if score < 0.4:
-        tip = "Acknowledge the customer's frustration. Use empathetic language: 'I understand how frustrating this must be.'"
-    elif score > 0.7:
-        tip = "Great rapport! Consider an upsell opportunity or ask for referral."
-    else:
-        tip = "Stay engaged. Ask open-ended questions to understand the customer's needs better."
+    response = await llm.ainvoke(
+        "You are a real-time call coach for a contact center agent. "
+        f"Current sentiment: {sentiment.get('sentiment', 'neutral')} (score: {score}). "
+        f"Emotions detected: {', '.join(emotions) if emotions else 'none'}. "
+        "Provide a brief, actionable coaching tip (1-2 sentences). "
+        "Focus on de-escalation, empathy, compliance, or upsell as appropriate.\n\n"
+        f"Recent transcript: {state.transcript[:2000]}"
+    )
 
-    return {"coaching_tip": tip}
+    return {"coaching_tip": response.content}
 
 
 async def generate_summary(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
-    """Generate post-call summary."""
-    return {
-        "summary": {
-            "synopsis": f"Call {state.call_id} lasted {state.duration_seconds}s. Disposition: {state.disposition}.",
-            "topics": [w for w in state.transcript.split() if len(w) > 6][:5] if state.transcript else [],
-            "action_items": [],
-            "sentiment_overall": state.sentiment.get("sentiment", "neutral") if state.sentiment else "neutral",
-            "follow_up_needed": state.disposition in ["callback", "escalation", "pending"],
-        }
-    }
+    """Generate post-call summary using LLM."""
+    response = await llm.ainvoke(
+        "Generate a post-call summary. Return ONLY valid JSON: "
+        '{"synopsis": "2-3 sentences", '
+        '"topics": ["topic1", "topic2"], '
+        '"action_items": [{"item": "...", "assignee": "agent|customer"}], '
+        '"sentiment_overall": "positive|neutral|negative", '
+        '"follow_up_needed": true/false, '
+        '"follow_up_reason": "reason or null"}\n\n'
+        f"Call ID: {state.call_id}\n"
+        f"Duration: {state.duration_seconds}s\n"
+        f"Disposition: {state.disposition}\n"
+        f"Transcript: {state.transcript[:4000]}"
+    )
+
+    try:
+        result = json.loads(response.content)
+    except (json.JSONDecodeError, TypeError):
+        result = {"synopsis": response.content, "topics": [], "action_items": []}
+
+    return {"summary": result}
 
 
 async def score_quality(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
-    """Score call quality."""
-    has_greeting = any(w in (state.transcript or "").lower() for w in ["hello", "hi", "good morning", "welcome"])
-    has_empathy = any(w in (state.transcript or "").lower() for w in ["understand", "sorry", "appreciate"])
-    has_resolution = any(w in (state.transcript or "").lower() for w in ["resolved", "fixed", "taken care"])
+    """Score call quality (rule-based for speed)."""
+    t = (state.transcript or "").lower()
+    has_greeting = any(w in t for w in ["hello", "hi", "good morning", "welcome"])
+    has_empathy = any(w in t for w in ["understand", "sorry", "appreciate"])
+    has_resolution = any(w in t for w in ["resolved", "fixed", "taken care"])
 
-    greeting_score = 8 if has_greeting else 4
-    empathy_score = 8 if has_empathy else 5
-    resolution_score = 9 if has_resolution else 5
-
-    overall = int((greeting_score + empathy_score + resolution_score) / 3 * 10)
+    greeting = 8 if has_greeting else 4
+    empathy = 8 if has_empathy else 5
+    resolution = 9 if has_resolution else 5
+    overall = int((greeting + empathy + resolution) / 3 * 10)
 
     return {
         "qa_score": {
             "overall_score": overall,
-            "greeting": greeting_score,
-            "empathy": empathy_score,
-            "resolution": resolution_score,
+            "greeting": greeting,
+            "empathy": empathy,
+            "resolution": resolution,
             "call_id": state.call_id,
         }
     }
 
 
 async def score_lead(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
-    """Score and qualify lead."""
+    """Score and qualify lead (rule-based for speed)."""
     sentiment_score = (state.sentiment or {}).get("score", 0.5)
     duration_factor = min(state.duration_seconds / 300, 1.0)
     engagement = sentiment_score * 0.4 + duration_factor * 0.6
+    score = int(engagement * 100)
 
     return {
         "lead_score": {
-            "score": int(engagement * 100),
-            "qualification": "hot" if engagement > 0.7 else "warm" if engagement > 0.4 else "cold",
-            "recommended_action": "schedule_callback" if engagement > 0.7 else "nurture",
+            "score": score,
+            "qualification": "hot" if score > 70 else "warm" if score > 40 else "cold",
+            "recommended_action": "schedule_callback" if score > 70 else "nurture",
             "call_id": state.call_id,
         }
     }
 
 
 async def suggest_routing(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
-    """Suggest call routing based on context."""
+    """Suggest call routing (rule-based for speed)."""
+    t = (state.transcript or "").lower()
     return {
         "routing": {
-            "suggested_queue": "retention" if "cancel" in (state.transcript or "").lower() else "general",
-            "priority": 8 if "urgent" in (state.transcript or "").lower() else 5,
-            "reason": "Caller mentioned cancellation" if "cancel" in (state.transcript or "").lower() else "Standard routing",
+            "suggested_queue": "retention" if "cancel" in t else "general",
+            "priority": 8 if "urgent" in t else 5,
+            "reason": "Caller mentioned cancellation" if "cancel" in t else "Standard routing",
             "call_id": state.call_id,
         }
     }
@@ -153,10 +184,10 @@ def route_by_action(state: State) -> str:
     """Route to the correct node based on requested action."""
     action_map = {
         "sentiment": "analyze_sentiment",
-        "coaching": "analyze_sentiment",  # coaching needs sentiment first
-        "summary": "analyze_sentiment",   # summary needs sentiment first
+        "coaching": "analyze_sentiment",
+        "summary": "analyze_sentiment",
         "qa": "score_quality",
-        "lead_score": "analyze_sentiment",  # lead score needs sentiment first
+        "lead_score": "analyze_sentiment",
         "route": "suggest_routing",
     }
     return action_map.get(state.action, "analyze_sentiment")
@@ -173,10 +204,8 @@ def route_after_sentiment(state: State) -> str:
     return END
 
 
-# Build the graph
 builder = StateGraph(State, context_schema=Context)
 
-# Add nodes
 builder.add_node("analyze_sentiment", analyze_sentiment)
 builder.add_node("generate_coaching", generate_coaching)
 builder.add_node("generate_summary", generate_summary)
@@ -184,13 +213,9 @@ builder.add_node("score_quality", score_quality)
 builder.add_node("score_lead", score_lead)
 builder.add_node("suggest_routing", suggest_routing)
 
-# Conditional entry based on action
 builder.add_conditional_edges("__start__", route_by_action)
-
-# After sentiment, route to next step or end
 builder.add_conditional_edges("analyze_sentiment", route_after_sentiment)
 
-# Terminal nodes
 builder.add_edge("generate_coaching", END)
 builder.add_edge("generate_summary", END)
 builder.add_edge("score_quality", END)
