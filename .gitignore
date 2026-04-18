@@ -2,3 +2,8 @@
 *.egg-info/
 __pycache__/
 .langgraph_api/
+.claude/
+.iceteam/
+.kombai/
+.kilo/
+.kilocode/

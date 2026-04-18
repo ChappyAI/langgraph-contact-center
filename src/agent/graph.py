@@ -1,4 +1,4 @@
-"""AllTalkPro Contact Center AI Agent — LangGraph implementation.
+"""Con.Nexus Contact Center AI Agent — LangGraph implementation.
 
 Multi-step agent for contact center operations:
 - Analyze call transcripts for sentiment and coaching (LLM-powered)
