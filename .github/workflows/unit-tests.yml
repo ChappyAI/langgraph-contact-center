@@ -32,7 +32,7 @@ jobs:
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           uv venv
-          uv pip install -r pyproject.toml
+          uv pip install -e .
       - name: Lint with ruff
         run: |
           uv pip install ruff
