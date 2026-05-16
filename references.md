@@ -589,30 +589,30 @@ The codebase carries some starter-template residue and a few minor inconsistenci
 
 ## 13. File Index
 
-Absolute paths (for direct linking from tooling):
+Repository-relative paths (resolved against the repo root wherever it is checked out):
 
 | Path | Role |
 | --- | --- |
-| `/home/user/langgraph-contact-center/src/agent/graph.py` | Sole graph implementation: state, nodes, routing, compiled `graph` symbol. |
-| `/home/user/langgraph-contact-center/src/agent/__init__.py` | Re-exports `graph` so `from agent import graph` works. |
-| `/home/user/langgraph-contact-center/langgraph.json` | LangGraph Server config; maps `agent` -> `./src/agent/graph.py:graph`, sets env file and image distro. |
-| `/home/user/langgraph-contact-center/pyproject.toml` | Project metadata, runtime + dev deps, ruff + mypy config, setuptools package mapping. |
-| `/home/user/langgraph-contact-center/Makefile` | `test`, `integration_tests`, `test_watch`, `lint`, `format`, `spell_check` targets. |
-| `/home/user/langgraph-contact-center/.env.example` | Template for `.env` (LANGSMITH_PROJECT placeholder). |
-| `/home/user/langgraph-contact-center/.gitignore` | Ignores `.env`, `.langgraph_api/`, IDE/AI tool caches, build artifacts. |
-| `/home/user/langgraph-contact-center/.codespellignore` | Empty codespell ignore list. |
-| `/home/user/langgraph-contact-center/LICENSE` | MIT license. |
-| `/home/user/langgraph-contact-center/INDEX.md` | Legacy starter-template orientation doc. |
-| `/home/user/langgraph-contact-center/README.md` | Original starter README (not yet rewritten for contact-center). |
-| `/home/user/langgraph-contact-center/uv.lock` | uv-resolved dependency lockfile. |
-| `/home/user/langgraph-contact-center/.github/workflows/unit-tests.yml` | Push/PR CI: ruff, mypy --strict, codespell, pytest unit tests, Python 3.11/3.12 matrix. |
-| `/home/user/langgraph-contact-center/.github/workflows/integration-tests.yml` | Daily cron + manual integration tests; injects LangSmith + (legacy) Anthropic secrets. |
-| `/home/user/langgraph-contact-center/tests/conftest.py` | Session-scoped `anyio_backend = "asyncio"` fixture. |
-| `/home/user/langgraph-contact-center/tests/unit_tests/__init__.py` | Package marker. |
-| `/home/user/langgraph-contact-center/tests/unit_tests/test_configuration.py` | Asserts compiled `graph` is a `langgraph.pregel.Pregel`. |
-| `/home/user/langgraph-contact-center/tests/integration_tests/__init__.py` | Package marker. |
-| `/home/user/langgraph-contact-center/tests/integration_tests/test_graph.py` | Smoke test: `await graph.ainvoke({"changeme": "some_val"})`. |
-| `/home/user/langgraph-contact-center/static/studio_ui.png` | README screenshot of LangGraph Studio. |
+| `src/agent/graph.py` | Sole graph implementation: state, nodes, routing, compiled `graph` symbol. |
+| `src/agent/__init__.py` | Re-exports `graph` so `from agent import graph` works. |
+| `langgraph.json` | LangGraph Server config; maps `agent` -> `./src/agent/graph.py:graph`, sets env file and image distro. |
+| `pyproject.toml` | Project metadata, runtime + dev deps, ruff + mypy config, setuptools package mapping. |
+| `Makefile` | `test`, `integration_tests`, `test_watch`, `lint`, `format`, `spell_check` targets. |
+| `.env.example` | Template for `.env` (LANGSMITH_PROJECT placeholder). |
+| `.gitignore` | Ignores `.env`, `.langgraph_api/`, IDE/AI tool caches, build artifacts. |
+| `.codespellignore` | Empty codespell ignore list. |
+| `LICENSE` | MIT license. |
+| `INDEX.md` | Legacy starter-template orientation doc. |
+| `README.md` | Original starter README (not yet rewritten for contact-center). |
+| `uv.lock` | uv-resolved dependency lockfile. |
+| `.github/workflows/unit-tests.yml` | Push/PR CI: ruff, mypy --strict, codespell, pytest unit tests, Python 3.11/3.12 matrix. |
+| `.github/workflows/integration-tests.yml` | Daily cron + manual integration tests; injects LangSmith + (legacy) Anthropic secrets. |
+| `tests/conftest.py` | Session-scoped `anyio_backend = "asyncio"` fixture. |
+| `tests/unit_tests/__init__.py` | Package marker. |
+| `tests/unit_tests/test_configuration.py` | Asserts compiled `graph` is a `langgraph.pregel.Pregel`. |
+| `tests/integration_tests/__init__.py` | Package marker. |
+| `tests/integration_tests/test_graph.py` | Smoke test: `await graph.ainvoke({"changeme": "some_val"})`. |
+| `static/studio_ui.png` | README screenshot of LangGraph Studio. |
 
 ---
 
