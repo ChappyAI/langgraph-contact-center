@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
@@ -45,13 +45,13 @@ class State:
     caller_number: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    sentiment: Optional[Dict[str, Any]] = None
-    coaching_tip: Optional[str] = None
-    summary: Optional[Dict[str, Any]] = None
-    qa_score: Optional[Dict[str, Any]] = None
-    lead_score: Optional[Dict[str, Any]] = None
-    routing: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
+    sentiment: Dict[str, Any] | None = None
+    coaching_tip: str | None = None
+    summary: Dict[str, Any] | None = None
+    qa_score: Dict[str, Any] | None = None
+    lead_score: Dict[str, Any] | None = None
+    routing: Dict[str, Any] | None = None
+    error: str | None = None
 
 
 async def analyze_sentiment(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
