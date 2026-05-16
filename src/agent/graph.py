@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, cast
 
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
@@ -201,7 +201,7 @@ def route_after_sentiment(state: State) -> str:
         return "generate_summary"
     elif state.action == "lead_score":
         return "score_lead"
-    return END
+    return cast(str, END)
 
 
 builder = StateGraph(State, context_schema=Context)
