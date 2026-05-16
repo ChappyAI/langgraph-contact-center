@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, cast
+from typing import Any, Dict
 
 from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
@@ -71,7 +71,7 @@ async def analyze_sentiment(state: State, runtime: Runtime[Context]) -> Dict[str
     )
 
     try:
-        result = json.loads(response.content)
+        result = json.loads(str(response.content))
     except (json.JSONDecodeError, TypeError):
         result = {
             "sentiment": "neutral",
@@ -121,7 +121,7 @@ async def generate_summary(state: State, runtime: Runtime[Context]) -> Dict[str,
     )
 
     try:
-        result = json.loads(response.content)
+        result = json.loads(str(response.content))
     except (json.JSONDecodeError, TypeError):
         result = {"synopsis": response.content, "topics": [], "action_items": []}
 
@@ -202,7 +202,7 @@ def route_after_sentiment(state: State) -> str:
         return "generate_summary"
     elif state.action == "lead_score":
         return "score_lead"
-    return cast(str, END)
+    return END
 
 
 builder = StateGraph(State, context_schema=Context)
