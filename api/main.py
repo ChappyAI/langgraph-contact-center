@@ -29,12 +29,22 @@ INVOKE_TIMEOUT_SECONDS = float(os.getenv("INVOKE_TIMEOUT_SECONDS", "55"))
 MAX_TRANSCRIPT_CHARS = int(os.getenv("MAX_TRANSCRIPT_CHARS", "50000"))
 
 
+def _check_api_key_configured() -> None:
+    """Validate LANG_API_KEY is set at import time / startup."""
+    if not os.getenv("LANG_API_KEY"):
+        raise RuntimeError(
+            "LANG_API_KEY environment variable is required but not set. "
+            "Refusing to start without authentication configured."
+        )
+
+
+_check_api_key_configured()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not os.getenv("OPENAI_API_KEY"):
         logger.warning("OPENAI_API_KEY not set — LLM nodes will fail.")
-    if not os.getenv("LANG_API_KEY"):
-        logger.warning("LANG_API_KEY not set — /invoke and /runs/stream accept unauthenticated requests.")
     logger.info("lang-api started on port %s", os.getenv("PORT", "8002"))
     yield
     logger.info("lang-api shutting down")
@@ -50,7 +60,7 @@ app = FastAPI(
 async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
     expected = os.getenv("LANG_API_KEY")
     if not expected:
-        return
+        raise HTTPException(status_code=503, detail="Service not configured: LANG_API_KEY not set")
     if not x_api_key or x_api_key != expected:
         raise HTTPException(status_code=401, detail="invalid or missing x-api-key")
 
