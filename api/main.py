@@ -22,8 +22,27 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        log_obj = {
+            "timestamp": self.formatTime(record),
+            "level": record.levelname,
+            "service": "langgraph-contact-center",
+            "message": record.getMessage(),
+            "module": record.module,
+        }
+        if record.exc_info:
+            log_obj["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_obj)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JSONFormatter())
+logging.root.handlers = [handler]
+logging.root.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 INVOKE_TIMEOUT_SECONDS = float(os.getenv("INVOKE_TIMEOUT_SECONDS", "55"))
 MAX_TRANSCRIPT_CHARS = int(os.getenv("MAX_TRANSCRIPT_CHARS", "50000"))
