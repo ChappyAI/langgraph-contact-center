@@ -7,6 +7,8 @@ primary_region = "iad"
   PORT = "8002"
   PYTHONUNBUFFERED = "1"
   LOG_LEVEL = "INFO"
+  LLM_MODEL = "gpt-4o-mini"
+  LLM_PROVIDER = "openai"
 
 [http_service]
   internal_port = 8002
