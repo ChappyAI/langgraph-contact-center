@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from functools import cache
 from typing import Any, Dict
 
 from langgraph.graph import END, StateGraph
@@ -19,7 +20,17 @@ from typing_extensions import TypedDict
 
 from agent.models import get_llm
 
-llm = get_llm()
+
+@cache
+def _llm() -> Any:
+    """Lazily construct the LLM so importing this module does not require an API key.
+
+    The OpenAI SDK validates the API key at client construction, so eager
+    instantiation at import time breaks any environment (including CI) that
+    cannot or does not need to talk to the model — for example, the unit test
+    that only verifies the compiled graph is a Pregel instance.
+    """
+    return get_llm()
 
 
 class Context(TypedDict, total=False):
@@ -59,7 +70,7 @@ async def analyze_sentiment(state: State, runtime: Runtime[Context]) -> Dict[str
     if not state.transcript:
         return {"sentiment": {"sentiment": "neutral", "score": 0.5, "emotions": []}}
 
-    response = await llm.ainvoke(
+    response = await _llm().ainvoke(
         "Analyze the sentiment of this call transcript. "
         "Return ONLY valid JSON: "
         '{"sentiment": "positive"|"neutral"|"negative", '
@@ -92,7 +103,7 @@ async def generate_coaching(state: State, runtime: Runtime[Context]) -> Dict[str
     score = sentiment.get("score", 0.5)
     emotions = sentiment.get("emotions", [])
 
-    response = await llm.ainvoke(
+    response = await _llm().ainvoke(
         "You are a real-time call coach for a contact center agent. "
         f"Current sentiment: {sentiment.get('sentiment', 'neutral')} (score: {score}). "
         f"Emotions detected: {', '.join(emotions) if emotions else 'none'}. "
@@ -106,7 +117,7 @@ async def generate_coaching(state: State, runtime: Runtime[Context]) -> Dict[str
 
 async def generate_summary(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """Generate post-call summary using LLM."""
-    response = await llm.ainvoke(
+    response = await _llm().ainvoke(
         "Generate a post-call summary. Return ONLY valid JSON: "
         '{"synopsis": "2-3 sentences", '
         '"topics": ["topic1", "topic2"], '
