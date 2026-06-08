@@ -13,12 +13,13 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict
 
-from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
 from typing_extensions import TypedDict
 
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+from agent.models import get_llm
+
+llm = get_llm()
 
 
 class Context(TypedDict, total=False):

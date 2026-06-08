@@ -1,0 +1,32 @@
+app = "chappy-lang-api"
+primary_region = "iad"
+
+[build]
+
+[env]
+  PORT = "8002"
+  PYTHONUNBUFFERED = "1"
+  LOG_LEVEL = "INFO"
+  LLM_MODEL = "gpt-4o-mini"
+  LLM_PROVIDER = "openai"
+
+[http_service]
+  internal_port = 8002
+  force_https = false
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "30s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1024mb"
+  cpu_kind = "shared"
+  cpus = 1
