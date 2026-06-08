@@ -16,7 +16,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
@@ -24,8 +24,11 @@ from pydantic import BaseModel, Field
 
 
 class JSONFormatter(logging.Formatter):
-    def format(self, record):
-        log_obj = {
+    """Structured JSON log formatter for stdout aggregation."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Render a log record as a single-line JSON object."""
+        log_obj: Dict[str, Any] = {
             "timestamp": self.formatTime(record),
             "level": record.levelname,
             "service": "langgraph-contact-center",
@@ -62,6 +65,7 @@ _check_api_key_configured()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """FastAPI lifespan: validate env on startup, log shutdown."""
     if not os.getenv("OPENAI_API_KEY"):
         logger.warning("OPENAI_API_KEY not set — LLM nodes will fail.")
     logger.info("lang-api started on port %s", os.getenv("PORT", "8002"))
@@ -76,7 +80,8 @@ app = FastAPI(
 )
 
 
-async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
+async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    """Enforce x-api-key header against LANG_API_KEY for protected routes."""
     expected = os.getenv("LANG_API_KEY")
     if not expected:
         raise HTTPException(status_code=503, detail="Service not configured: LANG_API_KEY not set")
@@ -85,6 +90,8 @@ async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> No
 
 
 class InvokeRequest(BaseModel):
+    """Payload for the /invoke endpoint — one call's worth of state."""
+
     action: str = Field(default="sentiment", description="sentiment | coaching | summary | qa | lead_score")
     transcript: str = Field(default="", max_length=MAX_TRANSCRIPT_CHARS)
     call_id: str = ""
@@ -97,11 +104,13 @@ class InvokeRequest(BaseModel):
 
 
 class InvokeResponse(BaseModel):
+    """Response envelope for the /invoke endpoint."""
+
     ok: bool
     action: str
     call_id: str
     result: Dict[str, Any]
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class RunsStreamRequest(BaseModel):
@@ -115,11 +124,13 @@ class RunsStreamRequest(BaseModel):
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
+    """Liveness probe returning service metadata."""
     return {"status": "ok", "service": "lang-api", "version": "1.0.0"}
 
 
 @app.get("/ok")
 async def ok() -> Dict[str, str]:
+    """Lightweight readiness probe used by the backend health check."""
     return {"status": "ok"}
 
 

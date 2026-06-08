@@ -29,20 +29,22 @@ def get_llm(
     Raises:
         ValueError: If an unsupported provider is specified.
     """
-    provider = (provider or os.getenv("LLM_PROVIDER", "openai")).lower()
+    provider = (provider or os.getenv("LLM_PROVIDER") or "openai").lower()
 
     if provider == "openai":
         default_model = "gpt-4o-mini"
         return ChatOpenAI(
-            model=model or os.getenv("LLM_MODEL", default_model),
+            model=model or os.getenv("LLM_MODEL") or default_model,
             temperature=temperature,
         )
 
     if provider in ("anthropic", "claude"):
         default_model = "claude-3-5-sonnet-20241022"
         return ChatAnthropic(
-            model=model or os.getenv("LLM_MODEL", default_model),
+            model_name=model or os.getenv("LLM_MODEL") or default_model,
             temperature=temperature,
+            timeout=None,
+            stop=None,
         )
 
     raise ValueError(f"Unsupported LLM provider: {provider}")
