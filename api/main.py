@@ -4,7 +4,7 @@ Endpoints:
 - GET  /health      — liveness
 - GET  /ok          — readiness (used by backend health check)
 - POST /invoke      — direct invoke (custom payload)
-- POST /runs/stream — LangGraph-platform-compatible SSE endpoint (used by NestJS LangGraphConnector)
+- POST /runs/stream — LangGraph-platform-compatible SSE endpoint for legacy clients
 
 Auth: x-api-key header validated against LANG_API_KEY env (skipped if unset for dev/internal flycast).
 """
