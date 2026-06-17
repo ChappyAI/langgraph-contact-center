@@ -151,12 +151,32 @@ def _serialize(state: Any) -> Dict[str, Any]:
 
 async def _run_graph(action: str, payload: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
     from agent.graph import graph
+    from api.tracing import current_call_id
+    
+    # Set the ContextVar so any deep LLM calls can pull the call_id
+    call_id = str(payload.get("call_id", "unknown_call"))
+    token = current_call_id.set(call_id)
 
     state = _build_state(action, payload)
-    result = await asyncio.wait_for(
-        graph.ainvoke(state, config={"configurable": context}),
-        timeout=INVOKE_TIMEOUT_SECONDS,
-    )
+    
+    # Inject call_id and action into LangSmith metadata for filtering
+    run_config = {
+        "configurable": context,
+        "metadata": {
+            "call_id": call_id, 
+            "action": action,
+            "tenant_id": str(payload.get("tenant_id", ""))
+        }
+    }
+    
+    try:
+        result = await asyncio.wait_for(
+            graph.ainvoke(state, config=run_config),
+            timeout=INVOKE_TIMEOUT_SECONDS,
+        )
+    finally:
+        current_call_id.reset(token)
+        
     return _serialize(result)
 
 
