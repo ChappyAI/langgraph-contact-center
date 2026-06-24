@@ -18,9 +18,16 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
+import logfire
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+logfire.configure(
+    token=os.getenv("LOGFIRE_TOKEN"),
+    service_name="chappy-lang-api",
+    send_to_logfire="if-token-present",
+)
 
 
 class JSONFormatter(logging.Formatter):
@@ -74,6 +81,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+logfire.instrument_fastapi(app)
 
 
 async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
