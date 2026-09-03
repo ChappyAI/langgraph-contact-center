@@ -33,6 +33,25 @@ def _llm() -> Any:
     return get_llm()
 
 
+def _llm_config(state: State) -> Dict[str, Any]:
+    """Build tracing metadata for a provider invocation."""
+    provider = str(state.metadata.get("provider") or "openai")
+    llm = _llm()
+    model = str(
+        state.metadata.get("model")
+        or getattr(llm, "model_name", getattr(llm, "model", ""))
+    )
+    return {
+        "metadata": {
+            "call_id": state.call_id,
+            "tenant_id": state.tenant_id,
+            "provider": provider,
+            "model": model,
+        },
+        "tags": [f"provider:{provider}", f"model:{model}"],
+    }
+
+
 class Context(TypedDict, total=False):
     """Runtime context for the contact center agent."""
 
@@ -78,7 +97,8 @@ async def analyze_sentiment(state: State, runtime: Runtime[Context]) -> Dict[str
         '"emotions": ["emotion1"], '
         '"trend": "improving"|"stable"|"declining", '
         '"alert": true/false}\n\n'
-        f"Transcript: {state.transcript[:4000]}"
+        f"Transcript: {state.transcript[:4000]}",
+        config=_llm_config(state),
     )
 
     try:
@@ -109,7 +129,8 @@ async def generate_coaching(state: State, runtime: Runtime[Context]) -> Dict[str
         f"Emotions detected: {', '.join(emotions) if emotions else 'none'}. "
         "Provide a brief, actionable coaching tip (1-2 sentences). "
         "Focus on de-escalation, empathy, compliance, or upsell as appropriate.\n\n"
-        f"Recent transcript: {state.transcript[:2000]}"
+        f"Recent transcript: {state.transcript[:2000]}",
+        config=_llm_config(state),
     )
 
     return {"coaching_tip": response.content}
@@ -128,7 +149,8 @@ async def generate_summary(state: State, runtime: Runtime[Context]) -> Dict[str,
         f"Call ID: {state.call_id}\n"
         f"Duration: {state.duration_seconds}s\n"
         f"Disposition: {state.disposition}\n"
-        f"Transcript: {state.transcript[:4000]}"
+        f"Transcript: {state.transcript[:4000]}",
+        config=_llm_config(state),
     )
 
     try:

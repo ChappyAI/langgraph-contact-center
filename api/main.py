@@ -108,6 +108,9 @@ class InvokeRequest(BaseModel):
     duration_seconds: int = 0
     disposition: str = ""
     caller_number: str = ""
+    provider: str = ""
+    model: str = ""
+    trigger: str = ""
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -168,26 +171,72 @@ def _serialize(state: Any) -> Dict[str, Any]:
     return {"value": state}
 
 
-async def _run_graph(action: str, payload: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+async def _run_graph(
+    action: str, payload: Dict[str, Any], context: Dict[str, Any]
+) -> Dict[str, Any]:
     from agent.graph import graph
     from api.tracing import current_call_id
-    
-    # Set the ContextVar so any deep LLM calls can pull the call_id
-    call_id = str(payload.get("call_id", "unknown_call"))
+
+    context = context or {}
+    call_id = str(payload.get("call_id") or context.get("call_id") or "unknown_call")
+    tenant_id = str(payload.get("tenant_id") or context.get("tenant_id") or "")
+    agent_id = str(payload.get("agent_id") or context.get("agent_id") or action)
+    trigger = str(payload.get("trigger") or context.get("trigger") or "")
+    provider = str(
+        payload.get("provider")
+        or context.get("provider")
+        or os.getenv("LLM_PROVIDER", "openai")
+    )
+    model = str(
+        payload.get("model")
+        or context.get("model")
+        or os.getenv("LLM_MODEL")
+        or (
+            "conv-primary"
+            if os.getenv("OPENAI_BASE_URL")
+            else "claude-3-5-sonnet-20241022"
+            if provider.lower() in ("anthropic", "claude")
+            else "gpt-4o-mini"
+        )
+    )
+    environment = (
+        os.getenv("LANGSMITH_ENVIRONMENT")
+        or os.getenv("ENVIRONMENT")
+        or os.getenv("FLY_APP_NAME")
+        or os.getenv("APP_NAME")
+        or "langgraph-contact-center"
+    )
     token = current_call_id.set(call_id)
 
-    state = _build_state(action, payload)
-    
-    # Inject call_id and action into LangSmith metadata for filtering
-    run_config = {
-        "configurable": context,
-        "metadata": {
-            "call_id": call_id, 
-            "action": action,
-            "tenant_id": str(payload.get("tenant_id", ""))
-        }
+    metadata = {
+        **(payload.get("metadata") or {}),
+        "call_id": call_id,
+        "tenant_id": tenant_id,
+        "action": action,
+        "agent_id": agent_id,
+        "trigger": trigger,
+        "provider": provider,
+        "model": model,
+        "thread_id": call_id,
+        "environment": environment,
     }
-    
+    state = _build_state(action, {**payload, "metadata": metadata})
+    run_config = {
+        "configurable": {
+            **context,
+            "call_id": call_id,
+            "tenant_id": tenant_id,
+            "action": action,
+            "thread_id": call_id,
+        },
+        "metadata": metadata,
+        "tags": [
+            f"agent:{agent_id}",
+            f"provider:{provider}",
+            f"environment:{environment}",
+        ],
+    }
+
     try:
         result = await asyncio.wait_for(
             graph.ainvoke(state, config=run_config),
@@ -195,7 +244,7 @@ async def _run_graph(action: str, payload: Dict[str, Any], context: Dict[str, An
         )
     finally:
         current_call_id.reset(token)
-        
+
     return _serialize(result)
 
 
