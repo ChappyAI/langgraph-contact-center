@@ -10,6 +10,7 @@ Multi-step agent for contact center operations:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, Dict
@@ -19,6 +20,28 @@ from langgraph.runtime import Runtime
 from typing_extensions import TypedDict
 
 from agent.models import get_llm
+
+
+_SENSITIVE_PATTERNS = (
+    re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
+    re.compile(r"\+?\d{10,15}"),
+    re.compile(r"\d{3}-\d{2}-\d{4}"),
+)
+
+
+def _redact_sensitive_data(value: Any) -> Any:
+    """Redact phone numbers, email addresses, and SSNs recursively."""
+    if isinstance(value, str):
+        for pattern in _SENSITIVE_PATTERNS:
+            value = pattern.sub("[REDACTED]", value)
+        return value
+    if isinstance(value, dict):
+        return {key: _redact_sensitive_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_sensitive_data(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_sensitive_data(item) for item in value)
+    return value
 
 
 @cache
@@ -78,7 +101,9 @@ async def analyze_sentiment(state: State, runtime: Runtime[Context]) -> Dict[str
         '"emotions": ["emotion1"], '
         '"trend": "improving"|"stable"|"declining", '
         '"alert": true/false}\n\n'
-        f"Transcript: {state.transcript[:4000]}"
+        "Refer to people only by role, such as caller and agent. "
+        "Never include a phone number, email address, or account identifier.\n\n"
+        f"Transcript: {_redact_sensitive_data(state.transcript[:4000])}"
     )
 
     try:
@@ -109,10 +134,12 @@ async def generate_coaching(state: State, runtime: Runtime[Context]) -> Dict[str
         f"Emotions detected: {', '.join(emotions) if emotions else 'none'}. "
         "Provide a brief, actionable coaching tip (1-2 sentences). "
         "Focus on de-escalation, empathy, compliance, or upsell as appropriate.\n\n"
-        f"Recent transcript: {state.transcript[:2000]}"
+        "Refer to people only by role, such as caller and agent. "
+        "Never include a phone number, email address, or account identifier.\n\n"
+        f"Recent transcript: {_redact_sensitive_data(state.transcript[:2000])}"
     )
 
-    return {"coaching_tip": response.content}
+    return {"coaching_tip": _redact_sensitive_data(response.content)}
 
 
 async def generate_summary(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
@@ -128,7 +155,9 @@ async def generate_summary(state: State, runtime: Runtime[Context]) -> Dict[str,
         f"Call ID: {state.call_id}\n"
         f"Duration: {state.duration_seconds}s\n"
         f"Disposition: {state.disposition}\n"
-        f"Transcript: {state.transcript[:4000]}"
+        "Refer to people only by role, such as caller and agent. "
+        "Never include a phone number, email address, or account identifier.\n\n"
+        f"Transcript: {_redact_sensitive_data(state.transcript[:4000])}"
     )
 
     try:
@@ -136,7 +165,7 @@ async def generate_summary(state: State, runtime: Runtime[Context]) -> Dict[str,
     except (json.JSONDecodeError, TypeError):
         result = {"synopsis": response.content, "topics": [], "action_items": []}
 
-    return {"summary": result}
+    return {"summary": _redact_sensitive_data(result)}
 
 
 async def score_quality(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:

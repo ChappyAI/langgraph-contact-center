@@ -162,9 +162,13 @@ def _build_state(action: str, payload: Dict[str, Any]):
 
 def _serialize(state: Any) -> Dict[str, Any]:
     if isinstance(state, dict):
-        return state
+        return {k: v for k, v in state.items() if k != "caller_number"}
     if hasattr(state, "__dict__"):
-        return {k: v for k, v in vars(state).items() if not k.startswith("_")}
+        return {
+            k: v
+            for k, v in vars(state).items()
+            if not k.startswith("_") and k != "caller_number"
+        }
     return {"value": state}
 
 
