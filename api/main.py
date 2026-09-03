@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 INVOKE_TIMEOUT_SECONDS = float(os.getenv("INVOKE_TIMEOUT_SECONDS", "55"))
 MAX_TRANSCRIPT_CHARS = int(os.getenv("MAX_TRANSCRIPT_CHARS", "50000"))
+TRANSCRIPT_ACTIONS = {"sentiment", "coaching", "summary", "lead_score"}
 
 
 def _check_api_key_configured() -> None:
@@ -101,7 +102,7 @@ class InvokeRequest(BaseModel):
     """Payload for the /invoke endpoint — one call's worth of state."""
 
     action: str = Field(default="sentiment", description="sentiment | coaching | summary | qa | lead_score")
-    transcript: str = Field(default="", max_length=MAX_TRANSCRIPT_CHARS)
+    transcript: str | None = Field(default=None, max_length=MAX_TRANSCRIPT_CHARS)
     call_id: str = ""
     tenant_id: str = ""
     agent_id: str = ""
@@ -146,7 +147,7 @@ def _build_state(action: str, payload: Dict[str, Any]):
     """Instantiate State dataclass from raw payload, defaulting safely."""
     from agent.graph import State
 
-    transcript = str(payload.get("transcript", ""))[:MAX_TRANSCRIPT_CHARS]
+    transcript = str(payload.get("transcript") or "")[:MAX_TRANSCRIPT_CHARS]
     return State(
         action=action,
         transcript=transcript,
@@ -199,9 +200,25 @@ async def _run_graph(action: str, payload: Dict[str, Any], context: Dict[str, An
     return _serialize(result)
 
 
+def _missing_transcript(action: str, payload: Dict[str, Any]) -> bool:
+    """Check whether a transcript-dependent request omitted its transcript."""
+    return action in TRANSCRIPT_ACTIONS and payload.get("transcript") is None
+
+
+def _transcript_error_event() -> str:
+    """Format the missing transcript error as an SSE event."""
+    return f"event: error\ndata: {json.dumps({'error': 'transcript is required'})}\n\n"
+
+
 @app.post("/invoke", response_model=InvokeResponse, dependencies=[Depends(require_api_key)])
 async def invoke(req: InvokeRequest) -> InvokeResponse:
     """Direct invoke — simple JSON request/response."""
+    if req.action in TRANSCRIPT_ACTIONS and req.transcript is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"loc": ["body", "transcript"], "msg": "Field required", "type": "missing"},
+        )
+
     payload = req.model_dump()
     context = {
         "tenant_id": req.tenant_id,
@@ -247,9 +264,16 @@ async def runs_stream(req: RunsStreamRequest):
     context = {**context, "action": action}
 
     async def event_stream():
+        if _missing_transcript(action, payload):
+            yield _transcript_error_event()
+            yield "data: [DONE]\n\n"
+            return
         try:
             result = await _run_graph(action, payload, context)
-            yield f"event: values\ndata: {json.dumps(result)}\n\n"
+            if isinstance(result, dict) and result.get("error"):
+                yield f"event: error\ndata: {json.dumps(result)}\n\n"
+            else:
+                yield f"event: values\ndata: {json.dumps(result)}\n\n"
             yield "data: [DONE]\n\n"
         except asyncio.TimeoutError:
             logger.warning("graph timeout (call_id=%s)", payload.get("call_id"))

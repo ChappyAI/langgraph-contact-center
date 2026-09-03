@@ -10,6 +10,7 @@ Multi-step agent for contact center operations:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, Dict
@@ -65,10 +66,14 @@ class State:
     error: str | None = None
 
 
+INSUFFICIENT_INPUT_ERROR = "insufficient_input: transcript is empty"
+TRANSCRIPT_ACTIONS = {"sentiment", "coaching", "summary", "lead_score"}
+
+
 async def analyze_sentiment(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """Analyze transcript sentiment using LLM."""
-    if not state.transcript:
-        return {"sentiment": {"sentiment": "neutral", "score": 0.5, "emotions": []}}
+    if not state.transcript.strip():
+        return {"error": INSUFFICIENT_INPUT_ERROR}
 
     response = await _llm().ainvoke(
         "Analyze the sentiment of this call transcript. "
@@ -99,6 +104,9 @@ async def analyze_sentiment(state: State, runtime: Runtime[Context]) -> Dict[str
 
 async def generate_coaching(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """Generate real-time coaching tip using LLM."""
+    if not state.transcript.strip():
+        return {"error": INSUFFICIENT_INPUT_ERROR}
+
     sentiment = state.sentiment or {}
     score = sentiment.get("score", 0.5)
     emotions = sentiment.get("emotions", [])
@@ -112,11 +120,31 @@ async def generate_coaching(state: State, runtime: Runtime[Context]) -> Dict[str
         f"Recent transcript: {state.transcript[:2000]}"
     )
 
-    return {"coaching_tip": response.content}
+    tip = str(response.content).strip()
+    sentences = re.findall(r"[^.!?]+[.!?]+", tip)
+    forbidden_request = re.search(
+        r"\b(provide|supply|share|send|tell|give)\b.*\b(dialogue|transcript|conversation|information|details|context|input|data)\b",
+        tip,
+        re.IGNORECASE,
+    )
+    if (
+        not tip
+        or not sentences
+        or len(sentences) > 2
+        or "".join(sentences).strip() != tip
+    ):
+        return {"error": "invalid_coaching_output"}
+    if tip[-1] not in ".!?" or forbidden_request:
+        return {"error": "invalid_coaching_output"}
+
+    return {"coaching_tip": tip}
 
 
 async def generate_summary(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """Generate post-call summary using LLM."""
+    if not state.transcript.strip():
+        return {"error": INSUFFICIENT_INPUT_ERROR}
+
     response = await _llm().ainvoke(
         "Generate a post-call summary. Return ONLY valid JSON: "
         '{"synopsis": "2-3 sentences", '
@@ -164,6 +192,9 @@ async def score_quality(state: State, runtime: Runtime[Context]) -> Dict[str, An
 
 async def score_lead(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """Score and qualify lead (rule-based for speed)."""
+    if not state.transcript.strip():
+        return {"error": INSUFFICIENT_INPUT_ERROR}
+
     sentiment_score = (state.sentiment or {}).get("score", 0.5)
     duration_factor = min(state.duration_seconds / 300, 1.0)
     engagement = sentiment_score * 0.4 + duration_factor * 0.6
@@ -179,6 +210,11 @@ async def score_lead(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     }
 
 
+async def insufficient_input(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
+    """Return a hard failure when transcript-dependent input is empty."""
+    return {"error": INSUFFICIENT_INPUT_ERROR}
+
+
 async def suggest_routing(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """Suggest call routing (rule-based for speed)."""
     t = (state.transcript or "").lower()
@@ -186,7 +222,9 @@ async def suggest_routing(state: State, runtime: Runtime[Context]) -> Dict[str, 
         "routing": {
             "suggested_queue": "retention" if "cancel" in t else "general",
             "priority": 8 if "urgent" in t else 5,
-            "reason": "Caller mentioned cancellation" if "cancel" in t else "Standard routing",
+            "reason": "Caller mentioned cancellation"
+            if "cancel" in t
+            else "Standard routing",
             "call_id": state.call_id,
         }
     }
@@ -194,6 +232,9 @@ async def suggest_routing(state: State, runtime: Runtime[Context]) -> Dict[str, 
 
 def route_by_action(state: State) -> str:
     """Route to the correct node based on requested action."""
+    if state.action in TRANSCRIPT_ACTIONS and not state.transcript.strip():
+        return "insufficient_input"
+
     action_map = {
         "sentiment": "analyze_sentiment",
         "coaching": "analyze_sentiment",
@@ -207,6 +248,9 @@ def route_by_action(state: State) -> str:
 
 def route_after_sentiment(state: State) -> str:
     """Route after sentiment analysis based on original action."""
+    if state.error:
+        return END
+
     if state.action == "coaching":
         return "generate_coaching"
     elif state.action == "summary":
@@ -224,6 +268,7 @@ builder.add_node("generate_summary", generate_summary)
 builder.add_node("score_quality", score_quality)
 builder.add_node("score_lead", score_lead)
 builder.add_node("suggest_routing", suggest_routing)
+builder.add_node("insufficient_input", insufficient_input)
 
 builder.add_conditional_edges("__start__", route_by_action)
 builder.add_conditional_edges("analyze_sentiment", route_after_sentiment)
@@ -233,5 +278,6 @@ builder.add_edge("generate_summary", END)
 builder.add_edge("score_quality", END)
 builder.add_edge("score_lead", END)
 builder.add_edge("suggest_routing", END)
+builder.add_edge("insufficient_input", END)
 
 graph = builder.compile(name="Contact Center Agent")
