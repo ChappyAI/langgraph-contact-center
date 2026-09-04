@@ -53,6 +53,9 @@ class State:
     agent_id: str = ""
     duration_seconds: int = 0
     disposition: str = ""
+    lead_id: str = ""
+    campaign_id: str = ""
+    campaign_outcome: str = ""
     caller_number: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -136,6 +139,8 @@ async def generate_summary(state: State, runtime: Runtime[Context]) -> Dict[str,
     except (json.JSONDecodeError, TypeError):
         result = {"synopsis": response.content, "topics": [], "action_items": []}
 
+    result["disposition"] = state.disposition
+    result["hangup_cause"] = state.disposition
     return {"summary": result}
 
 

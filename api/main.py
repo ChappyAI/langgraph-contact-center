@@ -12,6 +12,7 @@ Auth: x-api-key header validated against LANG_API_KEY env (skipped if unset for 
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -56,6 +57,9 @@ logger = logging.getLogger(__name__)
 
 INVOKE_TIMEOUT_SECONDS = float(os.getenv("INVOKE_TIMEOUT_SECONDS", "55"))
 MAX_TRANSCRIPT_CHARS = int(os.getenv("MAX_TRANSCRIPT_CHARS", "50000"))
+TRANSCRIPT_ANALYSIS_ACTIONS = {"sentiment", "coaching", "summary", "lead_score"}
+_RESULT_CACHE: Dict[tuple[str, str], tuple[Dict[str, Any], Any]] = {}
+_RESULT_CACHE_LOCK = asyncio.Lock()
 
 
 def _check_api_key_configured() -> None:
@@ -102,13 +106,19 @@ class InvokeRequest(BaseModel):
 
     action: str = Field(default="sentiment", description="sentiment | coaching | summary | qa | lead_score")
     transcript: str = Field(default="", max_length=MAX_TRANSCRIPT_CHARS)
-    call_id: str = ""
-    tenant_id: str = ""
-    agent_id: str = ""
-    duration_seconds: int = 0
-    disposition: str = ""
-    caller_number: str = ""
+    call_id: str | None = None
+    tenant_id: str | None = None
+    agent_id: str | None = None
+    duration_seconds: int | None = None
+    disposition: str | None = None
+    hangup_cause: str | None = None
+    lead_id: str | None = None
+    campaign_id: str | None = None
+    campaign_outcome: str | None = None
+    caller_number: str | None = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    supersede: bool = False
+    version: str | int | None = None
 
 
 class InvokeResponse(BaseModel):
@@ -142,20 +152,52 @@ async def ok() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+def _missing(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _assemble_call_context(action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and normalize the canonical call context."""
+    normalized = dict(payload)
+    disposition = normalized.get("disposition")
+    hangup_cause = normalized.get("hangup_cause")
+    if _missing(disposition) and not _missing(hangup_cause):
+        normalized["disposition"] = hangup_cause
+
+    if action in TRANSCRIPT_ANALYSIS_ACTIONS:
+        missing = [
+            name
+            for name in ("call_id", "tenant_id", "duration_seconds", "lead_id")
+            if _missing(normalized.get(name))
+        ]
+        if _missing(normalized.get("disposition")):
+            missing.append("disposition or hangup_cause")
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=f"incomplete call context: missing {', '.join(missing)}",
+            )
+    return normalized
+
+
 def _build_state(action: str, payload: Dict[str, Any]):
-    """Instantiate State dataclass from raw payload, defaulting safely."""
+    """Instantiate State from the canonical call context."""
     from agent.graph import State
 
+    payload = _assemble_call_context(action, payload)
     transcript = str(payload.get("transcript", ""))[:MAX_TRANSCRIPT_CHARS]
     return State(
         action=action,
         transcript=transcript,
-        call_id=str(payload.get("call_id", "")),
-        tenant_id=str(payload.get("tenant_id", "")),
-        agent_id=str(payload.get("agent_id", "")),
-        duration_seconds=int(payload.get("duration_seconds", 0) or 0),
-        disposition=str(payload.get("disposition", "")),
-        caller_number=str(payload.get("caller_number", "")),
+        call_id=payload.get("call_id") or "",
+        tenant_id=payload.get("tenant_id") or "",
+        agent_id=payload.get("agent_id") or "",
+        duration_seconds=payload.get("duration_seconds") or 0,
+        disposition=payload.get("disposition") or "",
+        lead_id=payload.get("lead_id") or "",
+        campaign_id=payload.get("campaign_id") or "",
+        campaign_outcome=payload.get("campaign_outcome") or "",
+        caller_number=payload.get("caller_number") or "",
         metadata=payload.get("metadata") or {},
     )
 
@@ -168,49 +210,68 @@ def _serialize(state: Any) -> Dict[str, Any]:
     return {"value": state}
 
 
-async def _run_graph(action: str, payload: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+async def _run_graph(
+    action: str, payload: Dict[str, Any], context: Dict[str, Any]
+) -> Dict[str, Any]:
     from agent.graph import graph
     from api.tracing import current_call_id
-    
-    # Set the ContextVar so any deep LLM calls can pull the call_id
-    call_id = str(payload.get("call_id", "unknown_call"))
-    token = current_call_id.set(call_id)
 
-    state = _build_state(action, payload)
-    
-    # Inject call_id and action into LangSmith metadata for filtering
-    run_config = {
-        "configurable": context,
-        "metadata": {
-            "call_id": call_id, 
-            "action": action,
-            "tenant_id": str(payload.get("tenant_id", ""))
+    normalized = _assemble_call_context(action, payload)
+    call_id = str(normalized.get("call_id") or "unknown_call")
+    cache_key = (call_id, action)
+    supersede = (
+        bool(normalized.get("supersede")) or normalized.get("version") is not None
+    )
+
+    async with _RESULT_CACHE_LOCK:
+        cached = _RESULT_CACHE.get(cache_key)
+        if cached is not None and not supersede:
+            return copy.deepcopy(cached[0])
+
+        token = current_call_id.set(call_id)
+        state = _build_state(action, normalized)
+        run_config = {
+            "configurable": context,
+            "metadata": {
+                "call_id": call_id,
+                "action": action,
+                "tenant_id": normalized.get("tenant_id") or "",
+            },
         }
-    }
-    
-    try:
-        result = await asyncio.wait_for(
-            graph.ainvoke(state, config=run_config),
-            timeout=INVOKE_TIMEOUT_SECONDS,
-        )
-    finally:
-        current_call_id.reset(token)
-        
-    return _serialize(result)
+        try:
+            result = await asyncio.wait_for(
+                graph.ainvoke(state, config=run_config),
+                timeout=INVOKE_TIMEOUT_SECONDS,
+            )
+        finally:
+            current_call_id.reset(token)
+
+        serialized = _serialize(result)
+        if cached is not None:
+            serialized = {**serialized, "superseded_previous_result": True}
+        if not serialized.get("error"):
+            _RESULT_CACHE[cache_key] = (
+                copy.deepcopy(serialized),
+                normalized.get("version"),
+            )
+        return serialized
 
 
 @app.post("/invoke", response_model=InvokeResponse, dependencies=[Depends(require_api_key)])
 async def invoke(req: InvokeRequest) -> InvokeResponse:
     """Direct invoke — simple JSON request/response."""
     payload = req.model_dump()
+    payload = _assemble_call_context(req.action, payload)
     context = {
-        "tenant_id": req.tenant_id,
-        "call_id": req.call_id,
+        "tenant_id": req.tenant_id or "",
+        "call_id": req.call_id or "",
         "agent_id": req.agent_id,
         "action": req.action,
     }
     try:
         result = await _run_graph(req.action, payload, context)
+    except HTTPException:
+        raise
     except asyncio.TimeoutError:
         logger.warning("graph timeout (call_id=%s)", req.call_id)
         raise HTTPException(status_code=504, detail="graph invocation timed out")
@@ -219,7 +280,7 @@ async def invoke(req: InvokeRequest) -> InvokeResponse:
         return InvokeResponse(
             ok=False,
             action=req.action,
-            call_id=req.call_id,
+            call_id=req.call_id or "",
             result={},
             error=str(exc),
         )
@@ -228,7 +289,7 @@ async def invoke(req: InvokeRequest) -> InvokeResponse:
     return InvokeResponse(
         ok=err is None,
         action=req.action,
-        call_id=req.call_id,
+        call_id=req.call_id or "",
         result=result,
         error=err,
     )
@@ -243,6 +304,7 @@ async def runs_stream(req: RunsStreamRequest):
     """
     action = req.assistant_id or "sentiment"
     payload = dict(req.input or {})
+    payload = _assemble_call_context(action, payload)
     context = (req.config or {}).get("configurable", {}) if isinstance(req.config, dict) else {}
     context = {**context, "action": action}
 
