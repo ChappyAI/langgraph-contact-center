@@ -10,6 +10,7 @@ Multi-step agent for contact center operations:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, Dict
@@ -20,9 +21,14 @@ from typing_extensions import TypedDict
 
 from agent.models import get_llm
 
+COACHING_MAX_TOKENS = 300
+SUMMARY_MAX_TOKENS = 600
+SUMMARY_RETRY_MAX_TOKENS = 1200
+TRUNCATION_REASONS = {"length", "max_tokens"}
+
 
 @cache
-def _llm() -> Any:
+def _llm(max_tokens: int | None = None) -> Any:
     """Lazily construct the LLM so importing this module does not require an API key.
 
     The OpenAI SDK validates the API key at client construction, so eager
@@ -30,7 +36,72 @@ def _llm() -> Any:
     cannot or does not need to talk to the model — for example, the unit test
     that only verifies the compiled graph is a Pregel instance.
     """
-    return get_llm()
+    return get_llm(max_tokens=max_tokens)
+
+
+def _finish_reason(response: Any) -> str | None:
+    """Return the provider completion stop reason."""
+    for attribute in ("response_metadata", "additional_kwargs"):
+        metadata = getattr(response, attribute, None)
+        if not isinstance(metadata, dict):
+            continue
+        for key in ("finish_reason", "stop_reason"):
+            reason = metadata.get(key)
+            if isinstance(reason, str):
+                return reason.lower()
+    return None
+
+
+def _is_truncated(response: Any) -> bool:
+    """Return whether the provider stopped at its completion-token cap."""
+    return _finish_reason(response) in TRUNCATION_REASONS
+
+
+def _valid_summary(value: Any) -> bool:
+    """Validate the summary contract returned by the model."""
+    if not isinstance(value, dict):
+        return False
+    required_keys = {
+        "synopsis",
+        "topics",
+        "action_items",
+        "sentiment_overall",
+        "follow_up_needed",
+        "follow_up_reason",
+    }
+    if not required_keys.issubset(value):
+        return False
+    if not isinstance(value["synopsis"], str):
+        return False
+    if not isinstance(value["topics"], list) or not all(
+        isinstance(topic, str) for topic in value["topics"]
+    ):
+        return False
+    if not isinstance(value["action_items"], list) or not all(
+        isinstance(item, dict)
+        and isinstance(item.get("item"), str)
+        and isinstance(item.get("assignee"), str)
+        for item in value["action_items"]
+    ):
+        return False
+    if value["sentiment_overall"] not in {"positive", "neutral", "negative"}:
+        return False
+    if not isinstance(value["follow_up_needed"], bool):
+        return False
+    return value["follow_up_reason"] is None or isinstance(
+        value["follow_up_reason"], str
+    )
+
+
+def _valid_coaching_tip(value: Any) -> bool:
+    """Validate that a coaching response is complete and concise."""
+    if not isinstance(value, str):
+        return False
+    tip = value.strip()
+    if not tip or tip.endswith("...") or tip[-1] not in ".!?":
+        return False
+    sentences = re.findall(r"[^.!?]+[.!?](?:\s|$)", tip)
+    return len(sentences) in {1, 2} and "".join(sentences).strip() == tip
 
 
 class Context(TypedDict, total=False):
@@ -103,7 +174,7 @@ async def generate_coaching(state: State, runtime: Runtime[Context]) -> Dict[str
     score = sentiment.get("score", 0.5)
     emotions = sentiment.get("emotions", [])
 
-    response = await _llm().ainvoke(
+    response = await _llm(max_tokens=COACHING_MAX_TOKENS).ainvoke(
         "You are a real-time call coach for a contact center agent. "
         f"Current sentiment: {sentiment.get('sentiment', 'neutral')} (score: {score}). "
         f"Emotions detected: {', '.join(emotions) if emotions else 'none'}. "
@@ -112,12 +183,14 @@ async def generate_coaching(state: State, runtime: Runtime[Context]) -> Dict[str
         f"Recent transcript: {state.transcript[:2000]}"
     )
 
-    return {"coaching_tip": response.content}
+    if _is_truncated(response) or not _valid_coaching_tip(response.content):
+        return {"error": "coaching generation was incomplete"}
+    return {"coaching_tip": response.content.strip()}
 
 
 async def generate_summary(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """Generate post-call summary using LLM."""
-    response = await _llm().ainvoke(
+    prompt = (
         "Generate a post-call summary. Return ONLY valid JSON: "
         '{"synopsis": "2-3 sentences", '
         '"topics": ["topic1", "topic2"], '
@@ -130,12 +203,19 @@ async def generate_summary(state: State, runtime: Runtime[Context]) -> Dict[str,
         f"Disposition: {state.disposition}\n"
         f"Transcript: {state.transcript[:4000]}"
     )
+    response = await _llm(max_tokens=SUMMARY_MAX_TOKENS).ainvoke(prompt)
+    if _is_truncated(response):
+        response = await _llm(max_tokens=SUMMARY_RETRY_MAX_TOKENS).ainvoke(prompt)
+        if _is_truncated(response):
+            return {"error": "summary generation was truncated"}
 
     try:
         result = json.loads(str(response.content))
     except (json.JSONDecodeError, TypeError):
-        result = {"synopsis": response.content, "topics": [], "action_items": []}
+        return {"error": "summary generation returned invalid JSON"}
 
+    if not _valid_summary(result):
+        return {"error": "summary generation returned an invalid schema"}
     return {"summary": result}
 
 
@@ -186,7 +266,9 @@ async def suggest_routing(state: State, runtime: Runtime[Context]) -> Dict[str, 
         "routing": {
             "suggested_queue": "retention" if "cancel" in t else "general",
             "priority": 8 if "urgent" in t else 5,
-            "reason": "Caller mentioned cancellation" if "cancel" in t else "Standard routing",
+            "reason": "Caller mentioned cancellation"
+            if "cancel" in t
+            else "Standard routing",
             "call_id": state.call_id,
         }
     }
