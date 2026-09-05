@@ -10,6 +10,7 @@ Multi-step agent for contact center operations:
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, Dict
@@ -65,32 +66,65 @@ class State:
     error: str | None = None
 
 
+def _validate_sentiment(result: Any) -> Dict[str, Any]:
+    """Validate and normalize a sentiment verdict."""
+    if not isinstance(result, Mapping):
+        raise ValueError("Invalid sentiment result: expected a mapping")
+
+    sentiment = result.get("sentiment")
+    score = result.get("score")
+    if sentiment not in {"negative", "neutral", "positive"}:
+        raise ValueError(f"Invalid sentiment label or score: {sentiment!r}/{score!r}")
+    if isinstance(score, bool):
+        raise ValueError(f"Invalid sentiment label or score: {sentiment!r}/{score!r}")
+    try:
+        normalized_score = float(score)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid sentiment label or score: {sentiment!r}/{score!r}"
+        ) from exc
+
+    if not 0.0 <= normalized_score <= 1.0:
+        raise ValueError(f"Invalid sentiment label or score: {sentiment!r}/{score!r}")
+    if sentiment == "negative" and normalized_score > 0.4:
+        raise ValueError(f"Invalid sentiment label or score: {sentiment!r}/{score!r}")
+    if sentiment == "neutral" and not 0.4 < normalized_score < 0.6:
+        raise ValueError(f"Invalid sentiment label or score: {sentiment!r}/{score!r}")
+    if sentiment == "positive" and normalized_score < 0.6:
+        raise ValueError(f"Invalid sentiment label or score: {sentiment!r}/{score!r}")
+
+    validated = dict(result)
+    validated["score"] = normalized_score
+    return validated
+
+
 async def analyze_sentiment(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """Analyze transcript sentiment using LLM."""
     if not state.transcript:
-        return {"sentiment": {"sentiment": "neutral", "score": 0.5, "emotions": []}}
+        result = _validate_sentiment(
+            {"sentiment": "neutral", "score": 0.5, "emotions": []}
+        )
+        result["alert"] = result["sentiment"] == "negative" and result["score"] <= 0.2
+        return {"sentiment": result}
 
     response = await _llm().ainvoke(
         "Analyze the sentiment of this call transcript. "
         "Return ONLY valid JSON: "
         '{"sentiment": "positive"|"neutral"|"negative", '
-        '"score": 0.0-1.0, '
+        '"score": 0.0-1.0 valence where 0.0 is strongly negative, '
+        '0.5 is neutral, and 1.0 is strongly positive, '
         '"emotions": ["emotion1"], '
-        '"trend": "improving"|"stable"|"declining", '
-        '"alert": true/false}\n\n'
+        '"trend": "improving"|"stable"|"declining"}\n\n'
         f"Transcript: {state.transcript[:4000]}"
     )
 
     try:
-        result = json.loads(str(response.content))
-    except (json.JSONDecodeError, TypeError):
-        result = {
-            "sentiment": "neutral",
-            "score": 0.5,
-            "emotions": [],
-            "trend": "stable",
-            "alert": False,
-        }
+        parsed_result = json.loads(str(response.content))
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("Sentiment model returned invalid JSON") from exc
+
+    result = _validate_sentiment(parsed_result)
+    result["alert"] = result["sentiment"] == "negative" and result["score"] <= 0.2
 
     result["call_id"] = state.call_id
     result["tenant_id"] = state.tenant_id
@@ -164,7 +198,8 @@ async def score_quality(state: State, runtime: Runtime[Context]) -> Dict[str, An
 
 async def score_lead(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """Score and qualify lead (rule-based for speed)."""
-    sentiment_score = (state.sentiment or {}).get("score", 0.5)
+    validated_sentiment = _validate_sentiment(state.sentiment)
+    sentiment_score = validated_sentiment["score"]
     duration_factor = min(state.duration_seconds / 300, 1.0)
     engagement = sentiment_score * 0.4 + duration_factor * 0.6
     score = int(engagement * 100)
