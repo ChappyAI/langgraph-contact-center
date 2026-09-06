@@ -9,28 +9,28 @@ Multi-step agent for contact center operations:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
-from functools import cache
 from typing import Any, Dict
 
 from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
 from typing_extensions import TypedDict
 
-from agent.models import get_llm
+from agent.models import get_llm_chain, is_terminal_provider_error, resolve_llm_config
 
 
-@cache
-def _llm() -> Any:
-    """Lazily construct the LLM so importing this module does not require an API key.
+class AllProvidersFailed(Exception):
+    """Raised when every configured LLM provider fails."""
 
-    The OpenAI SDK validates the API key at client construction, so eager
-    instantiation at import time breaks any environment (including CI) that
-    cannot or does not need to talk to the model — for example, the unit test
-    that only verifies the compiled graph is a Pregel instance.
-    """
-    return get_llm()
+    def __init__(self, last_error: BaseException, attempted_providers: list[str]):
+        """Store the last provider error and attempted providers."""
+        self.last_error = last_error
+        self.attempted_providers = attempted_providers
+        super().__init__(
+            f"All LLM providers failed ({', '.join(attempted_providers)}): {last_error}"
+        )
 
 
 class Context(TypedDict, total=False):
@@ -40,6 +40,10 @@ class Context(TypedDict, total=False):
     call_id: str
     agent_id: str
     action: str
+    provider: str
+    model: str
+    fallback_provider: str
+    fallback_model: str
 
 
 @dataclass
@@ -55,6 +59,10 @@ class State:
     disposition: str = ""
     caller_number: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
+    provider: str = ""
+    model: str = ""
+    fallback_provider: str = ""
+    fallback_model: str = ""
 
     sentiment: Dict[str, Any] | None = None
     coaching_tip: str | None = None
@@ -65,12 +73,51 @@ class State:
     error: str | None = None
 
 
+async def _invoke_with_fallback(
+    prompt: str, state: State, context: Context | None = None
+) -> Any:
+    """Invoke configured providers with terminal classification and retries."""
+    request_context = context or {}
+    provider, model, fallback_provider, fallback_model = resolve_llm_config(
+        state.provider or request_context.get("provider"),
+        state.model or request_context.get("model"),
+        state.fallback_provider or request_context.get("fallback_provider"),
+        state.fallback_model or request_context.get("fallback_model"),
+    )
+    providers = [provider]
+    if (fallback_provider, fallback_model) != (provider, model):
+        providers.append(fallback_provider)
+
+    last_error: BaseException | None = None
+    for index, llm in enumerate(
+        get_llm_chain(
+            provider,
+            model,
+            temperature=0.3,
+            fallback_provider=fallback_provider,
+            fallback_model=fallback_model,
+        )
+    ):
+        for attempt in range(3):
+            try:
+                return await llm.ainvoke(prompt)
+            except Exception as exc:
+                last_error = exc
+                if is_terminal_provider_error(exc) or attempt == 2:
+                    break
+                await asyncio.sleep(min(0.2 * (2**attempt), 1.0))
+
+    if last_error is None:
+        last_error = RuntimeError("No LLM providers configured")
+    raise AllProvidersFailed(last_error, providers)
+
+
 async def analyze_sentiment(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """Analyze transcript sentiment using LLM."""
     if not state.transcript:
         return {"sentiment": {"sentiment": "neutral", "score": 0.5, "emotions": []}}
 
-    response = await _llm().ainvoke(
+    response = await _invoke_with_fallback(
         "Analyze the sentiment of this call transcript. "
         "Return ONLY valid JSON: "
         '{"sentiment": "positive"|"neutral"|"negative", '
@@ -78,7 +125,9 @@ async def analyze_sentiment(state: State, runtime: Runtime[Context]) -> Dict[str
         '"emotions": ["emotion1"], '
         '"trend": "improving"|"stable"|"declining", '
         '"alert": true/false}\n\n'
-        f"Transcript: {state.transcript[:4000]}"
+        f"Transcript: {state.transcript[:4000]}",
+        state,
+        runtime.context,
     )
 
     try:
@@ -103,13 +152,15 @@ async def generate_coaching(state: State, runtime: Runtime[Context]) -> Dict[str
     score = sentiment.get("score", 0.5)
     emotions = sentiment.get("emotions", [])
 
-    response = await _llm().ainvoke(
+    response = await _invoke_with_fallback(
         "You are a real-time call coach for a contact center agent. "
         f"Current sentiment: {sentiment.get('sentiment', 'neutral')} (score: {score}). "
         f"Emotions detected: {', '.join(emotions) if emotions else 'none'}. "
         "Provide a brief, actionable coaching tip (1-2 sentences). "
         "Focus on de-escalation, empathy, compliance, or upsell as appropriate.\n\n"
-        f"Recent transcript: {state.transcript[:2000]}"
+        f"Recent transcript: {state.transcript[:2000]}",
+        state,
+        runtime.context,
     )
 
     return {"coaching_tip": response.content}
@@ -117,7 +168,7 @@ async def generate_coaching(state: State, runtime: Runtime[Context]) -> Dict[str
 
 async def generate_summary(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """Generate post-call summary using LLM."""
-    response = await _llm().ainvoke(
+    response = await _invoke_with_fallback(
         "Generate a post-call summary. Return ONLY valid JSON: "
         '{"synopsis": "2-3 sentences", '
         '"topics": ["topic1", "topic2"], '
@@ -128,7 +179,9 @@ async def generate_summary(state: State, runtime: Runtime[Context]) -> Dict[str,
         f"Call ID: {state.call_id}\n"
         f"Duration: {state.duration_seconds}s\n"
         f"Disposition: {state.disposition}\n"
-        f"Transcript: {state.transcript[:4000]}"
+        f"Transcript: {state.transcript[:4000]}",
+        state,
+        runtime.context,
     )
 
     try:
@@ -186,7 +239,9 @@ async def suggest_routing(state: State, runtime: Runtime[Context]) -> Dict[str, 
         "routing": {
             "suggested_queue": "retention" if "cancel" in t else "general",
             "priority": 8 if "urgent" in t else 5,
-            "reason": "Caller mentioned cancellation" if "cancel" in t else "Standard routing",
+            "reason": "Caller mentioned cancellation"
+            if "cancel" in t
+            else "Standard routing",
             "call_id": state.call_id,
         }
     }

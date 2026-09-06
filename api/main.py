@@ -92,7 +92,9 @@ async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
     """Enforce x-api-key header against LANG_API_KEY for protected routes."""
     expected = os.getenv("LANG_API_KEY")
     if not expected:
-        raise HTTPException(status_code=503, detail="Service not configured: LANG_API_KEY not set")
+        raise HTTPException(
+            status_code=503, detail="Service not configured: LANG_API_KEY not set"
+        )
     if not x_api_key or x_api_key != expected:
         raise HTTPException(status_code=401, detail="invalid or missing x-api-key")
 
@@ -100,7 +102,10 @@ async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
 class InvokeRequest(BaseModel):
     """Payload for the /invoke endpoint — one call's worth of state."""
 
-    action: str = Field(default="sentiment", description="sentiment | coaching | summary | qa | lead_score")
+    action: str = Field(
+        default="sentiment",
+        description="sentiment | coaching | summary | qa | lead_score",
+    )
     transcript: str = Field(default="", max_length=MAX_TRANSCRIPT_CHARS)
     call_id: str = ""
     tenant_id: str = ""
@@ -109,6 +114,10 @@ class InvokeRequest(BaseModel):
     disposition: str = ""
     caller_number: str = ""
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    provider: str = ""
+    model: str = ""
+    fallback_provider: str = ""
+    fallback_model: str = ""
 
 
 class InvokeResponse(BaseModel):
@@ -157,6 +166,10 @@ def _build_state(action: str, payload: Dict[str, Any]):
         disposition=str(payload.get("disposition", "")),
         caller_number=str(payload.get("caller_number", "")),
         metadata=payload.get("metadata") or {},
+        provider=str(payload.get("provider", "")),
+        model=str(payload.get("model", "")),
+        fallback_provider=str(payload.get("fallback_provider", "")),
+        fallback_model=str(payload.get("fallback_model", "")),
     )
 
 
@@ -168,26 +181,39 @@ def _serialize(state: Any) -> Dict[str, Any]:
     return {"value": state}
 
 
-async def _run_graph(action: str, payload: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+async def _run_graph(
+    action: str, payload: Dict[str, Any], context: Dict[str, Any]
+) -> Dict[str, Any]:
     from agent.graph import graph
+    from agent.models import resolve_llm_config
     from api.tracing import current_call_id
-    
+
     # Set the ContextVar so any deep LLM calls can pull the call_id
     call_id = str(payload.get("call_id", "unknown_call"))
     token = current_call_id.set(call_id)
 
     state = _build_state(action, payload)
-    
+    provider, model, fallback_provider, fallback_model = resolve_llm_config(
+        state.provider or context.get("provider"),
+        state.model or context.get("model"),
+        state.fallback_provider or context.get("fallback_provider"),
+        state.fallback_model or context.get("fallback_model"),
+    )
+
     # Inject call_id and action into LangSmith metadata for filtering
     run_config = {
         "configurable": context,
         "metadata": {
-            "call_id": call_id, 
+            "call_id": call_id,
             "action": action,
-            "tenant_id": str(payload.get("tenant_id", ""))
-        }
+            "tenant_id": str(payload.get("tenant_id", "")),
+            "provider": provider,
+            "model": model,
+            "fallback_provider": fallback_provider,
+            "fallback_model": fallback_model,
+        },
     }
-    
+
     try:
         result = await asyncio.wait_for(
             graph.ainvoke(state, config=run_config),
@@ -195,11 +221,13 @@ async def _run_graph(action: str, payload: Dict[str, Any], context: Dict[str, An
         )
     finally:
         current_call_id.reset(token)
-        
+
     return _serialize(result)
 
 
-@app.post("/invoke", response_model=InvokeResponse, dependencies=[Depends(require_api_key)])
+@app.post(
+    "/invoke", response_model=InvokeResponse, dependencies=[Depends(require_api_key)]
+)
 async def invoke(req: InvokeRequest) -> InvokeResponse:
     """Direct invoke — simple JSON request/response."""
     payload = req.model_dump()
@@ -216,12 +244,9 @@ async def invoke(req: InvokeRequest) -> InvokeResponse:
         raise HTTPException(status_code=504, detail="graph invocation timed out")
     except Exception as exc:
         logger.exception("Graph invocation failed (call_id=%s)", req.call_id)
-        return InvokeResponse(
-            ok=False,
-            action=req.action,
-            call_id=req.call_id,
-            result={},
-            error=str(exc),
+        raise HTTPException(
+            status_code=502,
+            detail={"error": str(exc), "error_type": type(exc).__name__},
         )
 
     err = result.get("error") if isinstance(result, dict) else None
@@ -243,22 +268,28 @@ async def runs_stream(req: RunsStreamRequest):
     """
     action = req.assistant_id or "sentiment"
     payload = dict(req.input or {})
-    context = (req.config or {}).get("configurable", {}) if isinstance(req.config, dict) else {}
+    context = (
+        (req.config or {}).get("configurable", {})
+        if isinstance(req.config, dict)
+        else {}
+    )
     context = {**context, "action": action}
 
+    try:
+        result = await _run_graph(action, payload, context)
+    except asyncio.TimeoutError:
+        logger.warning("graph timeout (call_id=%s)", payload.get("call_id"))
+        raise HTTPException(status_code=504, detail="graph invocation timed out")
+    except Exception as exc:
+        logger.exception("Graph stream failed (call_id=%s)", payload.get("call_id"))
+        raise HTTPException(
+            status_code=502,
+            detail={"error": str(exc), "error_type": type(exc).__name__},
+        )
+
     async def event_stream():
-        try:
-            result = await _run_graph(action, payload, context)
-            yield f"event: values\ndata: {json.dumps(result)}\n\n"
-            yield "data: [DONE]\n\n"
-        except asyncio.TimeoutError:
-            logger.warning("graph timeout (call_id=%s)", payload.get("call_id"))
-            yield f"event: error\ndata: {json.dumps({'error': 'graph invocation timed out'})}\n\n"
-            yield "data: [DONE]\n\n"
-        except Exception as exc:
-            logger.exception("Graph stream failed (call_id=%s)", payload.get("call_id"))
-            yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
-            yield "data: [DONE]\n\n"
+        yield f"event: values\ndata: {json.dumps(result)}\n\n"
+        yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         event_stream(),
