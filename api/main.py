@@ -19,7 +19,10 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict
 
 import logfire
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
+
+load_dotenv()
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 

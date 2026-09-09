@@ -66,3 +66,22 @@ Sentiment and summary nodes ask the LLM for **JSON only**, then `json.loads` the
 - Python 3.10+ (`requires-python = ">=3.10"`). `from __future__ import annotations` at the top of `graph.py` keeps annotations as strings — preserve this.
 - Ruff is the formatter and linter (pydocstyle google convention, imperative first lines via `D401`). `mypy --strict` is enforced by `make lint`.
 - The setuptools config exposes the package under **two** names: `agent` and `langgraph.templates.agent`, both pointing at `src/agent`. Don't rename the import path; the LangGraph platform expects the template namespace.
+
+## Deployment (Fly.io — app `chappy-lang-api`)
+
+```bash
+fly deploy --remote-only -a chappy-lang-api
+curl https://chappy-lang-api.fly.dev/health        # verify
+fly secrets set OPENAI_API_KEY=<value> LANGSMITH_API_KEY=<value> -a chappy-lang-api
+fly logs -a chappy-lang-api
+```
+
+- `fly.toml`: internal port **8002**, `/health` HTTP check, `auto_stop_machines = "suspend"`, `min_machines_running = 1`, `LLM_MODEL=gpt-4o-mini`.
+- Pushing the super-repo `main` auto-deploys this submodule when changed (`.github/workflows/deploy.yml`). Independent of backend/frontend deploy order — just verify `/health` after.
+- Local run under PM2 from the super-repo: process `chappy-lang-api` → `uv run uvicorn main:app --app-dir api --port 8002` (see `../ecosystem.config.js`).
+
+## Workspace Relationships
+
+- **Caller**: `telephony-service` (NestJS) hits this service via `LANGGRAPH_API_URL` when `FEATURE_EXTERNAL_AGENCY=true` — actions: sentiment, coaching, summary, QA score, lead score, routing.
+- **Siblings**: `crewai-contact-center` (delegated crew work, :8000) and `swarms-api` (agent assist, :8001) are parallel AI services; they do not call each other — the backend orchestrates all three.
+- This repo is a **git submodule** of `luhx/`; commits land here. Super-repo `AGENTS.md`/`CLAUDE.md` documents cross-service topology and deploy order.
